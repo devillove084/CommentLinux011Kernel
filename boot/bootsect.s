@@ -3,7 +3,7 @@
 ! 0x3000 is 0x30000 bytes = 196kB, more than enough for current
 ! versions of linux
 !
-SYSSIZE = 0x3000
+SYSSIZE = 0x3000 ! SYS_SIZE是要加载的节数(16字节为一节)。0x3000字节=196KB 编译链接后system模块的大小
 !
 !	bootsect.s		(C) 1991 Linus Torvalds
 !
@@ -22,38 +22,68 @@ SYSSIZE = 0x3000
 ! read errors will result in a unbreakable loop. Reboot by hand. It
 ! loads pretty fast by getting whole sectors at a time whenever possible.
 
-.globl begtext, begdata, begbss, endtext, enddata, endbss
-.text
-begtext:
-.data
-begdata:
-.bss
-begbss:
-.text
+! bootsect.s bios-启动子程序加载至 0x7c00 (31k)处,并将自己
+! 移到了地址 0x90000 (576k)处,并跳转。
+!
+! 它然后BIOS 中断将'setup'直接加载到自己的后面(0x90200)(576.5k),
+! 并将 system 加载到地址 0x10000 处。
+!
+! 注意! 目前的内核系统最大长度限制为(8*65536)(512k)字节,即使是在
+! 将来这也应该没有问题的。我想让它保持简单明了。这样 512k 的最大内核长度应该
+! 足够了,尤其是这里没有象 minix 中一样包含缓冲区高速缓冲。
+!
+! 加载程序已经做的够简单了,所以持续的读出错将导致死循环。只能手工重启。
+! 只要可能,通过一次取取所有的扇区,加载过程可以做的很快的。
+!
 
-SETUPLEN = 4				! nr of setup-sectors
-BOOTSEG  = 0x07c0			! original address of boot-sector
+.globl begtext, begdata, begbss, endtext, enddata, endbss !定义了6个全局标识符
+.text!文本段
+begtext:
+.data!数据段
+begdata:
+.bss!堆栈段
+begbss:
+.text!文本段
+
+SETUPLEN = 4				! nr of setup-sectors setup程序的扇区数
+BOOTSEG  = 0x07c0			! original address of boot-sector boot-sector的原始地址，也是段地址
 INITSEG  = 0x9000			! we move boot here - out of the way
 SETUPSEG = 0x9020			! setup starts here
-SYSSEG   = 0x1000			! system loaded at 0x10000 (65536).
-ENDSEG   = SYSSEG + SYSSIZE		! where to stop loading
+SYSSEG   = 0x1000			! system loaded at 0x10000 (65536). system模块加载到0x10000，也就是64kb
+ENDSEG   = SYSSEG + SYSSIZE		! where to stop loading 停止加载的段地址 0x3000 + 0x1000
 
-! ROOT_DEV:	0x000 - same type of floppy as boot.
-!		0x301 - first partition on first drive etc
+! ROOT_DEV:	0x000 - same type of floppy as boot. 根文件系统设备使用与引导时同样的软驱
+!		0x301 - first partition on first drive etc 根文件系统设备在第一个硬盘上的第一个分区
 ROOT_DEV = 0x306
 
-entry start
+! 指定根文件系统设备是第 2 个硬盘的第 1 个分区。这是 Linux 老式的硬盘命名
+! 方式,具体值的含义如下:
+! 设备号=主设备号*256 + 次设备号(也即 dev_no = (major<<8) + minor )
+! (主设备号:1-内存,2-磁盘,3-硬盘,4-ttyx,5-tty,6-并行口,7-非命名管道)
+! 0x300 - /dev/hd0 - 代表整个第 1 个硬盘;
+! 0x301 - /dev/hd1 - 第 1 个盘的第 1 个分区;
+! ...
+! 0x304 - /dev/hd4 - 第 1 个盘的第 4 个分区;
+! 0x305 - /dev/hd5 - 代表整个第 2 个硬盘盘;
+! 0x306 - /dev/hd6 - 第 2 个盘的第 1 个分区;
+! ...
+! 0x309 - /dev/hd9 - 第 2 个盘的第 4 个分区;
+
+entry start !声明链接程序位置 程序从start标号开始
+! 下面代码作用是将自身(bootsect)从目前段位置 0x07c0(31k)
+! 移动到 0x9000(576k)处,共 256 字(512 字节),然后跳转到
+! 移动后代码的 go 标号处,也即本程序的下一语句处。
 start:
-	mov	ax,#BOOTSEG
-	mov	ds,ax
+	mov	ax,#BOOTSEG 
+	mov	ds,ax ! 把ds段寄存器置为0x07c0
 	mov	ax,#INITSEG
-	mov	es,ax
-	mov	cx,#256
-	sub	si,si
-	sub	di,di
-	rep
-	movw
-	jmpi	go,INITSEG
+	mov	es,ax !把es段寄存器置为0x9000
+	mov	cx,#256 !计数器设置为256字
+	sub	si,si ! 源地址 ds:si = 0x07c0:0x0000
+	sub	di,di ! 目的地址 es:di = 0x9000:0x0000
+	rep ! 重复执行 ，直到 cx == 0
+	movw ! 移动一个字(word)
+	jmpi	go,INITSEG ! 段内跳转 程序 从INITSEG(0x9000):go (go是偏移地址) 开始执行 
 go:	mov	ax,cs
 	mov	ds,ax
 	mov	es,ax
