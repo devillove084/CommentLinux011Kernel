@@ -84,40 +84,68 @@ start:
 	rep ! 重复执行 ，直到 cx == 0
 	movw ! 移动一个字(word)
 	jmpi	go,INITSEG ! 段内跳转 程序 从INITSEG(0x9000):go (go是偏移地址) 开始执行 
-go:	mov	ax,cs
+go:	mov	ax,cs ! 将ds es ss 都设置成移动后代码所在段位置
 	mov	ds,ax
 	mov	es,ax
 ! put stack at 0x9ff00.
-	mov	ss,ax
+	mov	ss,ax ! 将堆栈段sp指向0x9ff00(0x9000:0xff00)
 	mov	sp,#0xFF00		! arbitrary value >>512
+
+! sp 只要指向远大于 512 偏移(即地址 0x90400)处
+! 都可以。因为从 0x90200 地址开始要放置 setup 程序,
+! 而此时 setup 程序大约为 4 个扇区,因此 sp 要指向大
+! 于(200 + 200 * 4 + 堆栈大小)处。
 
 ! load the setup-sectors directly after the bootblock.
 ! Note that 'es' is already set up.
+! 在bootsect程序块后紧根着加载setup模块的代码数据
+! es已经设置指向目的段地址处0x9000。
 
+! load_setup用途是利用 BIOS 中断 INT 0x13 将 setup 模块从磁盘第 2 个扇区
+! 开始读到 0x90200 开始处,共读 4 个扇区。如果读出错,则复位驱动器,并
+! 重试,没有退路。INT 0x13 的使用方法如下:
+! 读扇区:
+! ah = 0x02 - 读磁盘扇区到内存; al = 需要读出的扇区数量;
+! ch = 磁道(柱面)号的低 8 位;
+! cl = 开始扇区(0-5 位),磁道号高 2 位(6-7);
+! dh = 磁头号;
+! dl = 驱动器号(如果是硬盘则要置位 7);
+! es:bx 指向数据缓冲区; 如果出错则 CF 标志置位。
 load_setup:
-	mov	dx,#0x0000		! drive 0, head 0
-	mov	cx,#0x0002		! sector 2, track 0
-	mov	bx,#0x0200		! address = 512, in INITSEG
-	mov	ax,#0x0200+SETUPLEN	! service 2, nr of sectors
-	int	0x13			! read it
-	jnc	ok_load_setup		! ok - continue
-	mov	dx,#0x0000
-	mov	ax,#0x0000		! reset the diskette
-	int	0x13
-	j	load_setup
+	mov	dx,#0x0000		! drive 0, head 0 ! 0号驱动器，0号磁头
+	mov	cx,#0x0002		! sector 2, track 0 ! 2号扇区，0号柱面
+	mov	bx,#0x0200		! address = 512, in INITSEG ! 指向数据缓冲区，设置标志位
+	mov	ax,#0x0200+SETUPLEN	! service 2, nr of sectors ! 从512字节开始，读取4个扇区的位置
+	int	0x13			! read it ! 设置中断0x13 进行扇区读取
+	jnc	ok_load_setup		! ok - continue ! CF=0时跳转，AX大于等于0时，跳转到ok_load_setup
+	mov	dx,#0x0000 ! dx清空
+	mov	ax,#0x0000		! reset the diskette ！ax 清空
+	int	0x13 ! 如果不满足上面jnc继续循环执行读取扇区的操作
+	j	load_setup ! 无条件跳转循环
 
 ok_load_setup:
 
-! Get disk drive parameters, specifically nr of sectors/track
+! 取磁盘驱动器的参数,特别是每道的扇区数量。
+! 取磁盘驱动器参数 INT 0x13 调用格式和返回信息如下:
+! ah = 0x08
+! dl = 驱动器号(如果是硬盘则要置位 7 为 1)。
+! 返回信息:
+! 如果出错则 CF 置位,并且 ah = 状态码。
+! ah = 0, al = 0,
+! bl = 驱动器类型(AT/PS2)
+! ch = 最大磁道号的低 8 位,cl = 每磁道最大扇区数(位 0-5),最大磁道号高 2 位(位 6-7)
+! dh = 最大磁头数,
+! dl = 驱动器数量,
+! es:di - 软驱磁盘参数表
 
-	mov	dl,#0x00
-	mov	ax,#0x0800		! AH=8 is get drive parameters
-	int	0x13
-	mov	ch,#0x00
-	seg cs
-	mov	sectors,cx
-	mov	ax,#INITSEG
-	mov	es,ax
+	mov	dl,#0x00 ! 清空dl
+	mov	ax,#0x0800		! AH=8 is get drive parameters ! AX高位设置0x08
+	int	0x13 ! 设置中断调用
+	mov	ch,#0x00 ! 清零ch
+	seg cs ! 返回cs的段基址
+	mov	sectors,cx ! 将cx中的值复制给sectors 保存每磁道扇区数
+	mov	ax,#INITSEG ! ax初始化
+	mov	es,ax ! 重新改回es的值
 
 ! Print some inane message
 
