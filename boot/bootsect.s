@@ -149,47 +149,62 @@ ok_load_setup:
 
 ! Print some inane message
 
-	mov	ah,#0x03		! read cursor pos
+	mov	ah,#0x03		! read cursor pos !获取指针位置
 	xor	bh,bh
-	int	0x10
+	int	0x10 ! 中断获取位置
 	
-	mov	cx,#24
+	mov	cx,#24 !一共24个字符
 	mov	bx,#0x0007		! page 0, attribute 7 (normal)
-	mov	bp,#msg1
+	mov	bp,#msg1        ! 指向要显示的字符串
 	mov	ax,#0x1301		! write string, move cursor
-	int	0x10
+	int	0x10            ! 写字符串并移动光标  
 
 ! ok, we've written the message, now
 ! we want to load the system (at 0x10000)
-
-	mov	ax,#SYSSEG
-	mov	es,ax		! segment of 0x010000
-	call	read_it
-	call	kill_motor
+! 加载system模块到0x100000处(64k)
+	mov	ax,#SYSSEG 
+	mov	es,ax		! segment of 0x010000 ! es存放system的段地址
+	call	read_it ! 读取磁盘上system模块, es作为输入参数
+	call	kill_motor ! 关闭驱动器引擎，了解驱动器状态
 
 ! After that we check which root-device to use. If the device is
 ! defined (!= 0), nothing is done and the given device is used.
 ! Otherwise, either /dev/PS0 (2,28) or /dev/at0 (2,8), depending
 ! on the number of sectors that the BIOS reports currently.
+! 检查要使用哪个根文件系统设备(简称根设备)。如果已经指定了设备(!=0)
+! 就直接使用给定的设备。否则就需要根据 BIOS 报告的每磁道扇区数来
+! 确定到底使用/dev/PS0 (2,28) 还是 /dev/at0 (2,8)。
 
-	seg cs
-	mov	ax,root_dev
-	cmp	ax,#0
-	jne	root_defined
-	seg cs
-	mov	bx,sectors
+! 两个设备文件的含义:
+! 在 Linux 中软驱的主设备号是 2,次设备号 = type*4 + nr,其中
+! nr 为 0-3 分别对应软驱 A、B、C 或 D;type 是软驱的类型(2 1.2M 或 7 1.44M 等)。
+! 因为 7*4 + 0 = 28,所以 /dev/PS0 (2,28)指的是 1.44M A 驱动器,其设备号是 0x021c
+! 同理 /dev/at0 (2,8)指的是 1.2M A 驱动器,其设备号是 0x0208。
+	seg cs !获取代码段段基址
+	mov	ax,root_dev ! 获取根设备号
+	cmp	ax,#0 
+	jne	root_defined ! 跳转保存检查过的根设备号
+	seg cs ! 获取代码段段基址
+	mov	bx,sectors ! 获取上面保存的每磁道扇区数
+
+    ! 取上面保存的每磁道扇区数。如果 sectors=15
+    ! 则说明是 1.2Mb 的驱动器;如果 sectors=18,则说明是
+    ! 1.44Mb 软驱。因为是可引导的驱动器,所以肯定是 A 驱。
+
 	mov	ax,#0x0208		! /dev/ps0 - 1.2Mb
-	cmp	bx,#15
-	je	root_defined
+	cmp	bx,#15 ! 判断每磁道数是否等于15
+	je	root_defined ! 如果等于15 ax中就是引导驱动器的设备号
 	mov	ax,#0x021c		! /dev/PS0 - 1.44Mb
-	cmp	bx,#18
+	cmp	bx,#18 ! 同上 判断每磁道数是否等于18
 	je	root_defined
-undef_root:
+undef_root: ! 如果都不一样，就会死循环
 	jmp undef_root
-root_defined:
+root_defined: ! 保存检查过的设备号
 	seg cs
 	mov	root_dev,ax
 
+
+!所有程序都加载完毕,跳转到被加载在 bootsect 后面的 setup 程序去。
 ! after that (everyting loaded), we jump to
 ! the setup-routine loaded directly after
 ! the bootblock:
