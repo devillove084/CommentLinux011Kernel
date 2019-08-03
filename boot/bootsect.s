@@ -209,86 +209,125 @@ root_defined: ! 保存检查过的设备号
 ! the setup-routine loaded directly after
 ! the bootblock:
 
-	jmpi	0,SETUPSEG
+	jmpi	0,SETUPSEG ! 跳转到0x9020:0000(setup.s程序的开始处)
+
+
+
+
 
 ! This routine loads the system at address 0x10000, making sure
 ! no 64kB boundaries are crossed. We try to load it as fast as
 ! possible, loading whole tracks whenever we can.
 !
 ! in:	es - starting address segment (normally 0x1000)
-!
+
+! 该子程序将系统模块加载到内存地址 0x10000 处,并确定没有跨越 64KB 的内存边界
+! 每次尽可能加载整条磁道的数据。
+! 输入:es – 开始内存地址段值(通常是 0x1000)
+
 sread:	.word 1+SETUPLEN	! sectors read of current track
-head:	.word 0			! current head
-track:	.word 0			! current track
+                            ! 当前磁道中已读的扇区数。开始时已经读进1扇区的引导扇区
+                            ! bootsect 和 setup 程序所占的扇区数SETUPLEN
+head:	.word 0			! current head ! 当前磁头号
+track:	.word 0			! current track ! 当前磁道号
 
 read_it:
-	mov ax,es
-	test ax,#0x0fff
-die:	jne die			! es must be at 64kB boundary
-	xor bx,bx		! bx is starting address within segment
-rp_read:
-	mov ax,es
-	cmp ax,#ENDSEG		! have we loaded all yet?
-	jb ok1_read
-	ret
-ok1_read:
-	seg cs
-	mov ax,sectors
-	sub ax,sread
-	mov cx,ax
-	shl cx,#9
-	add cx,bx
-	jnc ok2_read
-	je ok2_read
-	xor ax,ax
-	sub ax,bx
-	shr ax,#9
-ok2_read:
-	call read_track
-	mov cx,ax
-	add ax,sread
-	seg cs
-	cmp ax,sectors
-	jne ok3_read
-	mov ax,#1
-	sub ax,head
-	jne ok4_read
-	inc track
-ok4_read:
-	mov head,ax
-	xor ax,ax
-ok3_read:
-	mov sread,ax
-	shl cx,#9
-	add bx,cx
-	jnc rp_read
-	mov ax,es
-	add ax,#0x1000
-	mov es,ax
-	xor bx,bx
-	jmp rp_read
+! 测试输入的段值。必须位于内存地址 64KB 边界处,否则进入死循环。清 bx 寄存器,用于表示当前段内
+! 存放数据的开始位置
+! 因为使用了将系统模块加载到64kb处，并没有确定跨越内存边界，所以要在边界处测试输入的段值
 
+	mov ax,es ! 获取es地址
+	test ax,#0x0fff ! 判断是否为空
+die:	jne die			! es must be at 64kB boundary ! es值必须为64kb地址边界
+	xor bx,bx		! bx is starting address within segment ! bx为段内偏移地址
+
+rp_read:
+
+! 判断是否已经读入全部数据。比较当前所读段是否就是系统数据末端所处的段(#ENDSEG),如果不是就
+! 跳转至下面 ok1_read 标号处继续读数据，否则退出子程序返回。
+	mov ax,es ! 获取es基址
+	cmp ax,#ENDSEG		! have we loaded all yet? ! 是否完整加载全部数据
+	jb ok1_read ! 不是跳转ok1_read
+	ret ! 返回主程序
+
+ok1_read:
+
+! 计算和验证当前磁道需要读取的扇区数,放在ax寄存器中。
+! 根据当前磁道还未读取的扇区数以及段内数据字节开始偏移位置,计算如果全部读取这些未读扇区,所
+! 读总字节数是否会超过 64KB 段长度的限制。若会超过,则根据此次最多能读入的字节数(64KB – 段内
+! 偏移位置),反算出此次需要读取的扇区数。
+
+	seg cs ! 获取代码段的基址
+	mov ax,sectors ! 获取每个磁道的扇区数
+	sub ax,sread ! 减去当前磁道未读扇区数
+	mov cx,ax ! cx = ax 为当前磁道未读扇区数
+	shl cx,#9 ! cx = cx * 2^9(512)字节
+	add cx,bx ! cx = cx + 段内当前偏移地址(bx)
+	jnc ok2_read ! 如果没有超过64KB字节，则跳转ok_read执行
+	je ok2_read 
+
+	xor ax,ax ! 若加上此次将读磁道上所有未读扇区时会超过 64KB,则计算
+    sub ax,bx ! 此时最多能读入的字节数(64KB – 段内读偏移位置),再转换
+    shr ax,#9 ! 成需要读取的扇区数。
+
+ok2_read:
+	call read_track ! 调用read_track
+	mov cx,ax ! cx = 本次操作已经读取的扇区数
+	add ax,sread ! 当前磁道上已经读取的扇区数
+	seg cs ! 获取cs的基址
+	cmp ax,sectors ! 如果当期磁道上还有扇区未读，跳转ok3_read执行
+	jne ok3_read 
+
+	mov ax,#1 ! 读该磁道的下一磁头面(1 号磁头)上的数据。如果已经完成,则去读下一磁道
+	sub ax,head ! 判断当前磁头号
+	jne ok4_read ! 如果是 0 磁头,则再跳转ok4_read去读1磁头面上的扇区数据
+	inc track ! 否则读下一磁道
+
+ok4_read:
+	mov head,ax ! 保存当前磁头号
+	xor ax,ax ! 清理当前磁道已读扇区数
+
+ok3_read:
+	mov sread,ax ! 保存当前磁道已读扇区数
+	shl cx,#9 ! 上次已读扇区数*512字节
+	add bx,cx ! 调整到当前段内数据开始位置
+	jnc rp_read 
+    ! 若小于 64KB 边界值,则跳转到rp_read处,继续读数据。
+    ! 否则调整当前段,为读下一段数据作准备。
+
+	mov ax,es
+	add ax,#0x1000 ! 将段基址调整为指向下一个 64KB 段内存
+    
+	mov es,ax 
+	xor bx,bx
+	jmp rp_read ! 清理段内数据开始偏移值，并且跳转rp_read处，继续读数据
+
+! 读当前磁道上指定开始扇区和需读扇区数的数据到 es:bx 开始处，BIOS磁盘读中断
+! int 0x13,ah=2
+! al – 需读扇区数;es:bx – 缓冲区开始位置。
 read_track:
 	push ax
 	push bx
 	push cx
-	push dx
-	mov dx,track
-	mov cx,sread
-	inc cx
-	mov ch,dl
-	mov dx,head
-	mov dh,dl
-	mov dl,#0
-	and dx,#0x0100
-	mov ah,#2
+	push dx ! 保存现场
+	mov dx,track ! 获取当前磁道号
+	mov cx,sread ! 获取当前磁道上已读扇区数
+	inc cx ! cl = 开始读扇区
+	mov ch,dl ! ch = 当前磁道号
+	mov dx,head ! 获取当前磁头号
+	mov dh,dl ! dh = 磁头号
+	mov dl,#0 ! dl = 驱动器号(0表示当前驱动器)
+	and dx,#0x0100 ! 磁头号不大于1
+	mov ah,#2 ! 中断标志 ah=2 读取磁盘扇区功能号
 	int 0x13
-	jc bad_rt
+	jc bad_rt ! 如果cf=0 说明出错，跳转bad_rt
 	pop dx
 	pop cx
 	pop bx
 	pop ax
-	ret
+	ret ! 恢复现场
+
+! 执行驱动器复位操作(磁盘中断功能号 0),再跳转到 read_track 处重试。
 bad_rt:	mov ax,#0
 	mov dx,#0
 	int 0x13
@@ -303,27 +342,34 @@ bad_rt:	mov ax,#0
  * that we enter the kernel in a known state, and
  * don't have to worry about it later.
  */
+
+! 这个子程序用于关闭软驱的引擎,进入内核后它处于已知状态
 kill_motor:
 	push dx
-	mov dx,#0x3f2
-	mov al,#0
-	outb
+	mov dx,#0x3f2 ! 软驱控制卡的驱动端口，只写
+	mov al,#0 ! A 驱动器,关闭 FDC,禁止 DMA 和中断请求,关闭引擎
+	outb ! 将 al 中的内容输出到 dx 指定的端口
 	pop dx
 	ret
 
 sectors:
-	.word 0
+	.word 0 ! 存放当前启动软盘每磁道的扇区数
 
 msg1:
-	.byte 13,10
-	.ascii "Loading system ..."
-	.byte 13,10,13,10
+	.byte 13,10 ! 回车、换行的 ASCII 码
+	.ascii "Loading system ..." 
+	.byte 13,10,13,10 ! 共 24 个 ASCII 码字符
 
 .org 508
+
+! 表示下面语句从地址 508(0x1FC)开始,所以 root_dev
+! 在启动扇区的第 508 开始的 2 个字节中
+
 root_dev:
-	.word ROOT_DEV
+	.word ROOT_DEV ! 这里存放根文件系统所在的设备号(init/main.c 中会用)
 boot_flag:
-	.word 0xAA55
+	.word 0xAA55 ! 硬盘有效标识
+
 
 .text
 endtext:
@@ -331,3 +377,13 @@ endtext:
 enddata:
 .bss
 endbss:
+
+
+
+bootsect.s 代码是磁盘引导块程序,驻留在磁盘的第一个扇区中(引导扇区,0 磁道(柱面),0 磁头,第 1 个扇区)。
+在 PC 机加电 ROM BIOS 自检后,引导扇区由 BIOS 加载到内存 0x7C00 处,然后将自己移动到内存 0x90000 处。
+该程序的主要作用是首先将 setup 模块(由 setup.s 编译成)从磁盘加载到内存紧接着 bootsect 的后面位置(0x90200),然后利用 BIOS 中断 0x13 取磁盘参数表中当前启动引导盘的参数,
+接着在屏幕上显示“Loading system...”字符串。再者将 system 模块从磁盘上加载到内存 0x10000 开始的地方。
+随后确定根文件系统的设备号,若没有指定,则根据所保存的引导盘的每磁道扇区数判别出盘的
+类型和种类(是 1.44M A 盘)并保存其设备号于 root_dev(引导块的 0x508 地址处),最后长跳转到 setup
+程序的开始处(0x90200)执行 setup 程序
