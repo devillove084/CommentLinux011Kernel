@@ -12,11 +12,17 @@
 ! for buffer-blocks.
 !
 
+! setup.s 负责从 BIOS 中获取系统数据,并将这些数据放到系统内存的适当地方。
+! 此时 setup.s 和 system 已经由 bootsect 引导块加载到内存中。
+! 这段代码询问 bios 有关内存/磁盘/其它参数,并将这些参数放到一个
+! “安全的”地方:0x90000-0x901FF,也即原来 bootsect 代码块曾经在
+! 的地方,然后在被缓冲块覆盖掉之前由保护模式的 system 读取。
+
 ! NOTE! These had better be the same as in bootsect.s!
 
-INITSEG  = 0x9000	! we move boot here - out of the way
-SYSSEG   = 0x1000	! system loaded at 0x10000 (65536).
-SETUPSEG = 0x9020	! this is the current segment
+INITSEG  = 0x9000	! we move boot here - out of the way ! 原本bootsect所处的段
+SYSSEG   = 0x1000	! system loaded at 0x10000 (65536). ! system 在64k处
+SETUPSEG = 0x9020	! this is the current segment ! 本程序所处在的段基址
 
 .globl begtext, begdata, begbss, endtext, enddata, endbss
 .text
@@ -33,20 +39,37 @@ start:
 ! ok, the read went well so we get current cursor position and save it for
 ! posterity.
 
-	mov	ax,#INITSEG	! this is done in bootsect already, but...
+	mov	ax,#INITSEG	! this is done in bootsect already, but... ! 重置ds的基址
 	mov	ds,ax
 	mov	ah,#0x03	! read cursor pos
+
+! BIOS 中断 0x10 的读光标功能号 ah = 0x03
+! 输入:bh = 页号
+! 返回:ch = 扫描开始线,cl = 扫描结束线,
+! dh = 行号(0x00 是顶端),dl = 列号(0x00 是左边)。
+
 	xor	bh,bh
 	int	0x10		! save it in known place, con_init fetches
 	mov	[0],dx		! it from 0x90000.
+! 光标位置保存在0x90000处，控制台初始化会使用
 
 ! Get memory size (extended mem, kB)
 
-	mov	ah,#0x88
+! 下面3句取扩展内存的大小值(KB)。
+! 是调用中断 0x15,功能号 ah = 0x88
+! 返回:ax = 从 0x100000(1M)处开始的扩展内存大小(KB)。
+! 若出错则 CF 置位,ax = 出错码。
+
+	mov	ah,#0x88 
 	int	0x15
-	mov	[2],ax
+	mov	[2],ax ! 将扩展内存数值保存在0x90002(一个字)
 
 ! Get video-card data:
+
+! 下面这段用于取显示卡当前显示模式。
+! 调用 BIOS 中断 0x10,功能号 ah = 0x0f
+! 返回:ah = 字符列数,al = 显示模式,bh = 当前显示页。
+! 0x90004(1 字)存放当前页,0x90006 显示模式,0x90007 字符列数。
 
 	mov	ah,#0x0f
 	int	0x10
@@ -55,22 +78,40 @@ start:
 
 ! check for EGA/VGA and some config parameters
 
+! 检查显示方式(EGA/VGA)并取参数。
+! 调用 BIOS 中断 0x10,附加功能选择 -取方式信息
+! 功能号:ah = 0x12,bl = 0x10
+! 返回:bh = 显示状态
+!(0x00 - 彩色模式,I/O 端口=0x3dX)
+!(0x01 - 单色模式,I/O 端口=0x3bX)
+! bl = 安装的显示内存
+! (0x00 - 64k, 0x01 - 128k, 0x02 - 192k, 0x03 = 256k)
+! cx = 显示卡特性参数(参见程序后的说明)。
+
 	mov	ah,#0x12
 	mov	bl,#0x10
 	int	0x10
-	mov	[8],ax
-	mov	[10],bx
-	mov	[12],cx
+	mov	[8],ax ! 0x90008 = 保存的功能号数值
+	mov	[10],bx ! 0x9000A = 安装的显存，0x9000B = 显示状态(彩色/单色)
+	mov	[12],cx ! 0x9000C = 显卡特性参数
 
 ! Get hd0 data
 
+! 取第一个硬盘的信息(复制硬盘参数表)。
+! 第1个硬盘参数表的首地址是中断向量 0x41 的向量值，第2个硬盘
+! 参数表紧接第1个表的后面,中断向量 0x46 的向量值也指向这第2个硬盘
+! 的参数表首址。表的长度是16个字节(0x10)。
+
+! 下面两段程序分别复制 BIOS 有关两个硬盘的参数表,0x90080 处存放第 1 个
+! 硬盘的表,0x90090 处存放第 2 个硬盘的表。
+
 	mov	ax,#0x0000
 	mov	ds,ax
-	lds	si,[4*0x41]
+	lds	si,[4*0x41] ! 取中断向量0x41的值，也就是hd0参数表中的地址ds:si
 	mov	ax,#INITSEG
 	mov	es,ax
-	mov	di,#0x0080
-	mov	cx,#0x10
+	mov	di,#0x0080 ! 传输的目的地址 0x9000:0x0080 -> es:di
+	mov	cx,#0x10 ! 传输0x10字节，也就是一个表的长度
 	rep
 	movsb
 
@@ -78,10 +119,10 @@ start:
 
 	mov	ax,#0x0000
 	mov	ds,ax
-	lds	si,[4*0x46]
+	lds	si,[4*0x46] ! 取中断向量0x46的值,就是hd1参数表的地址ds:si
 	mov	ax,#INITSEG
 	mov	es,ax
-	mov	di,#0x0090
+	mov	di,#0x0090 ! 传输的目的地址: 0x9000:0x0090->es:di
 	mov	cx,#0x10
 	rep
 	movsb
