@@ -129,14 +129,20 @@ start:
 
 ! Check that there IS a hd1 :-)
 
-	mov	ax,#0x01500
-	mov	dl,#0x81
-	int	0x13
-	jc	no_disk1
-	cmp	ah,#3
-	je	is_disk1
+! 检查系统是否存在第 2 个硬盘,如果不存在则第 2 个表清零。
+! 利用 BIOS 中断调用 0x13 的取盘类型功能。
+! 功能号 ah = 0x15;
+! 输入:dl = 驱动器号(0x8X 是硬盘:0x80 指第 1 个硬盘,0x81 第 2 个硬盘)
+! 输出:ah = 类型码;00 --没有这个盘,CF 置位; 01 --是软驱, 02 --是软驱(或其它可移动设备),有 change-line03 --是硬盘。
+
+	mov	ax,#0x01500 ! 功能号输入
+	mov	dl,#0x81 ! 取第一个硬盘
+	int	0x13 ! 中断号
+	jc	no_disk1 ! 检查是否是硬盘，并跳转
+	cmp	ah,#3 ! 类型码是否是硬盘
+	je	is_disk1 ! 是就跳转
 no_disk1:
-	mov	ax,#INITSEG
+	mov	ax,#INITSEG ! 第二个硬盘不存在，对第二个硬盘表清零
 	mov	es,ax
 	mov	di,#0x0090
 	mov	cx,#0x10
@@ -146,51 +152,72 @@ no_disk1:
 is_disk1:
 
 ! now we want to move to protected mode ...
-
+! 接下来是保护模式
 	cli			! no interrupts allowed !
-
+! 此时不许中断
 ! first we move the system to it's rightful place
+
+! 首先我们将 system 模块移到正确的位置。
+! bootsect 引导程序是将 system 模块读入到从 0x10000(64k)开始的位置。由于当时假设
+! system 模块最大长度不会超过 0x80000(512k),也即其末端不会超过内存地址 0x90000,
+! 所以 bootsect 会将自己移动到 0x90000 开始的地方,并把 setup 加载到它的后面。
+
+! 下面这段程序的用途是再把整个 system 模块移动到 0x00000 位置,即把从 0x10000 到 0x8ffff
+! 内存数据块(512k),整块地向内存低端移动了 0x10000(64k)的位置。
 
 	mov	ax,#0x0000
 	cld			! 'direction'=0, movs moves forward
+
 do_move:
-	mov	es,ax		! destination segment
+	mov	es,ax		! destination segment es:di 为目的地址(0x0000:0x0)
 	add	ax,#0x1000
-	cmp	ax,#0x9000
+	cmp	ax,#0x9000 ! 是否将从0x8000段开始的64k代码移动完毕
 	jz	end_move
-	mov	ds,ax		! source segment
+	mov	ds,ax		! source segment ! ds:si为源地址(0x1000:0x0)
 	sub	di,di
 	sub	si,si
-	mov 	cx,#0x8000
+	mov 	cx,#0x8000 (移动0x8000字)
 	rep
 	movsw
-	jmp	do_move
+	jmp	do_move ! 循环检查
 
 ! then we load the segment descriptors
 
+! 此后,加载段描述符。
+! lidt 指令用于加载中断描述符表(idt)寄存器,它的操作数是 6 个字节,0-1 字节是描述符表的
+! 长度值(字节);2-5 字节是描述符表的 32 位线性基地址(首地址)
+! 中断描述符表中的每一个表项(8 字节)指出发生中断时
+! 需要调用的代码的信息,与中断向量有些相似,但要包含更多的信息。
+! lgdt 指令用于加载全局描述符表(gdt)寄存器,其操作数格式与 lidt 指令的相同。全局描述符
+! 表中的每个描述符项(8 字节)描述了保护模式下数据和代码段(块)的信息。其中包括段的
+! 最大长度限制(16 位)、段的线性基址(32 位)、段的特权级、段是否在内存、读写许可以及
+! 其它一些保护模式运行的标志
+
 end_move:
 	mov	ax,#SETUPSEG	! right, forgot this at first. didn't work :-)
-	mov	ds,ax
+	mov	ds,ax ! ds指向程序段(setup)
 	lidt	idt_48		! load idt with 0,0
+    ! 加载中断描述符表(idt)寄存器,idt_48 是 6 字节操作数的位置
+    ! 前 2 字节表示 idt 表的限长,后 4 字节表示 idt 表所处的基地址。
 	lgdt	gdt_48		! load gdt with whatever appropriate
+    ! 加载全局描述符表(gdt)寄存器,gdt_48 是 6 字节操作数的位置
 
 ! that was painless, now we enable A20
+! 开启A20地址线
+	call	empty_8042 ! 等待输入缓冲器空，只有当输入缓冲器为空时才可以对其进行写命令。
+	mov	al,#0xD1		! command write 0xD1 命令码-表示要写数据到8042 的 P2 端口。
+                        ! P2 端口的位 1 用于 A20 线的选通
+	out	#0x64,al ! 数据要写到 0x60 端口。
 
-	call	empty_8042
-	mov	al,#0xD1		! command write
-	out	#0x64,al
-	call	empty_8042
-	mov	al,#0xDF		! A20 on
-	out	#0x60,al
-	call	empty_8042
+	call	empty_8042 ! 等待输入缓冲器空,看命令是否被接受。
+	mov	al,#0xDF		! A20 on 选通 A20 地址线的参数。
+	out	#0x60,al ! 数据写到0x60
+	call	empty_8042 ! 输入缓冲器为空,则表示 A20 线已经选通
 
-! well, that went ok, I hope. Now we have to reprogram the interrupts :-(
-! we put them right after the intel-reserved hardware interrupts, at
-! int 0x20-0x2F. There they won't mess up anything. Sadly IBM really
-! messed this up with the original PC, and they haven't been able to
-! rectify it afterwards. Thus the bios puts interrupts at 0x08-0x0f,
-! which is used for the internal hardware interrupts as well. We just
-! have to reprogram the 8259's, and it isn't fun.
+! 现在必须重新对中断进行编程
+! 将它们放在正好处于 intel 保留的硬件中断后面,在 int 0x20-0x2F
+! PC 机的 bios 将中断放在了 0x08-0x0f,这些中断也被用于内部硬件中断。
+! 所以必须重新对8259中断控制器进行编程
 
 	mov	al,#0x11		! initialization sequence
 	out	#0x20,al		! send it to 8259A-1
