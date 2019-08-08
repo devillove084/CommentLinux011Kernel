@@ -219,29 +219,42 @@ end_move:
 ! PC 机的 bios 将中断放在了 0x08-0x0f,这些中断也被用于内部硬件中断。
 ! 所以必须重新对8259中断控制器进行编程
 
-	mov	al,#0x11		! initialization sequence
-	out	#0x20,al		! send it to 8259A-1
+	mov	al,#0x11		! initialization sequence 
+    ! 0x11 表示初始化命令开始,
+    ! 是 ICW1 命令字,表示边沿触发、多片 8259
+    ! 级连、最后要发送 ICW4 命令字。
+
+    out	#0x20,al		! send it to 8259A-1 ! 发送到8259A主芯片
 	.word	0x00eb,0x00eb		! jmp $+2, jmp $+2
-	out	#0xA0,al		! and to 8259A-2
+    ! $ 表示当前指令的地址,
+    ! 两条跳转指令,跳到下一条指令,起延时作用。
+	
+    out	#0xA0,al		! and to 8259A-2 ! 再发送到主芯片
 	.word	0x00eb,0x00eb
 	mov	al,#0x20		! start of hardware int's (0x20)
+    ! 送 主 芯片 ICW2 命令字,起始中断号,要送奇地址。
 	out	#0x21,al
 	.word	0x00eb,0x00eb
 	mov	al,#0x28		! start of hardware int's 2 (0x28)
+    ! 送 从 芯片 ICW2 命令字,起始中断号。
 	out	#0xA1,al
 	.word	0x00eb,0x00eb
 	mov	al,#0x04		! 8259-1 is master
+    ! 送主芯片 ICW3 命令字,主芯片的 IR2 连从芯片 INT。
 	out	#0x21,al
 	.word	0x00eb,0x00eb
 	mov	al,#0x02		! 8259-2 is slave
+    ! 送从芯片 ICW3 命令字,表示从芯片的 INT 连到主芯片的 IR2 引脚上。
 	out	#0xA1,al
 	.word	0x00eb,0x00eb
 	mov	al,#0x01		! 8086 mode for both
+    ! 送两个芯片的 ICW4 命令字。8086 模式;普通 EOI 方式,需发送指令来复位。初始化结束,芯片就绪。
 	out	#0x21,al
 	.word	0x00eb,0x00eb
 	out	#0xA1,al
 	.word	0x00eb,0x00eb
 	mov	al,#0xFF		! mask off all interrupts for now
+    ! 当前屏蔽所有中断请求。
 	out	#0x21,al
 	.word	0x00eb,0x00eb
 	out	#0xA1,al
@@ -256,27 +269,53 @@ end_move:
 ! we let the gnu-compiled 32-bit programs do that. We just jump to
 ! absolute address 0x00000, in 32-bit protected mode.
 
-	mov	ax,#0x0001	! protected mode (PE) bit
-	lmsw	ax		! This is it!
-	jmpi	0,8		! jmp offset 0 of segment 8 (cs)
+! 这里设置进入 32 位保护模式运行。首先加载机器状态字(lmsw - Load Machine Status Word),也称
+! 控制寄存器 CR0,其比特位 0 置 1 将导致 CPU 工作在保护模式。
+
+	mov	ax,#0x0001	! protected mode (PE) bit ! 保护模式bit
+	lmsw	ax		! This is it! ! 加载状态字
+	jmpi	0,8		! jmp offset 0 of segment 8 (cs) ! 跳转至 cs 段 8,偏移 0 处。
+
+! 已经将 system 模块移动到 0x00000 开始的地方,所以这里的偏移地址是 0。这里的段
+! 值的 8 已经是保护模式下的段选择符,用于选择描述符表和描述符表项以及所要求的特权级。
+
+! 段选择符长度为 16 位(2 字节);位 0-1 表示请求的特权级 0-3,linux 操作系统只
+! 用到两级:0 级(系统级)和 3 级(用户级);位 2 用于选择全局描述符表(0)还是局部描
+! 述符表(1);位 3-15 是描述符表项的索引,指出选择第几项描述符。
+
+! 所以段选择符8(0b0000,0000,0000,1000)表示请求特权级 0、使用全局描述符表中的第 1 项,该项指出
+! 代码的基地址是 0,因此这里的跳转指令就会去执行 system 中的代码。
+
 
 ! This routine checks that the keyboard command queue is empty
 ! No timeout is used - if this hangs there is something wrong with
 ! the machine, and we probably couldn't proceed anyway.
+
+! 下面这个子程序检查键盘命令队列是否为空。这里不使用超时方法 - 如果这里死机,
+! 则说明 PC 机有问题,我们就没有办法再处理下去了。
+! 只有当输入缓冲器为空时(状态寄存器位 2 = 0)才可以对其进行写命令
+
 empty_8042:
-	.word	0x00eb,0x00eb
-	in	al,#0x64	! 8042 status port
-	test	al,#2		! is input buffer full?
-	jnz	empty_8042	! yes - loop
+	.word	0x00eb,0x00eb ! 延时操作
+	in	al,#0x64	! 8042 status port ! 读AT键盘控制器状态寄存器
+	test	al,#2		! is input buffer full? ! 测试位2，输入缓冲器满判断
+	jnz	empty_8042	! yes - loop ! 循环判断
 	ret
 
 gdt:
-	.word	0,0,0,0		! dummy
+
+! 全局描述符表开始处。描述符表由多个 8 字节长的描述符项组成。
+! 这里给出了 3 个描述符项。第 1 项无用,但须存在。
+! 第 2 项是系统代码段描述符,第 3 项是系统数据段描述符。
+
+	.word	0,0,0,0		! dummy ! 第 1 个描述符,不用。
+! 这里在 gdt 表中的偏移量为 0x08,当加载代码段寄存器(段选择符)时,使用的是这个偏移值。
 
 	.word	0x07FF		! 8Mb - limit=2047 (2048*4096=8Mb)
 	.word	0x0000		! base address=0
 	.word	0x9A00		! code read/exec
 	.word	0x00C0		! granularity=4096, 386
+! 这里在 gdt 表中的偏移量是 0x10,当加载数据段寄存器(如 ds 等)时,使用的是这个偏移值。
 
 	.word	0x07FF		! 8Mb - limit=2047 (2048*4096=8Mb)
 	.word	0x0000		! base address=0
@@ -289,6 +328,9 @@ idt_48:
 
 gdt_48:
 	.word	0x800		! gdt limit=2048, 256 GDT entries
+    ! 全局表长度为 2k 字节,因为每 8 字节组成一个段描述符项
+    ! 所以表中共可有 256 项。
+
 	.word	512+gdt,0x9	! gdt base = 0X9xxxx
 	
 .text
@@ -297,3 +339,13 @@ endtext:
 enddata:
 .bss
 endbss:
+
+
+setup 程序的作用主要是利用 ROM BIOS 中断读取机器系统数据,并将这些数据保存到 0x90000 开始的
+位置(覆盖掉了 bootsect 程序所在的地方),这些参数将被内核中相关程序使用。
+
+然后 setup 程序将 system 模块从 0x10000-0x8ffff(当时认为内核系统模块 system 的长度不会超过
+此值:512KB)整块向下移动到内存绝对地址 0x00000 处。接下来加载中断描述符表寄存器(idtr)和全局
+描述符表寄存器(gdtr),开启 A20 地址线,重新设置两个中断控制芯片 8259A,将硬件中断号重新设置为
+0x20 - 0x2f。最后设置 CPU 的控制寄存器 CR0(也称机器状态字)
+,从而进入 32 位保护模式运行,并跳转到位于 system 模块最前面部分的 head.s 程序继续运行。
