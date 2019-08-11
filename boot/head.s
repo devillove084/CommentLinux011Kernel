@@ -11,29 +11,42 @@
  * the page directory will exist. The startup code will be overwritten by
  * the page directory.
  */
+# 32 位启动代码是从绝对地址 0x00000000 开始的,这里也同样是页目录将存在的地方,
+# 这里的启动代码将被页目录覆盖掉。
+# 对于AT&T汇编来说,每个直接数要以'$'开始,否则是表示地址。
+# 每个寄存器名都要以'%'开头,eax 表示是 32 位的 ax 寄存器。
+
 .text
 .globl _idt,_gdt,_pg_dir,_tmp_floppy_area
-_pg_dir:
+_pg_dir: # 页目录会存放在这里
 startup_32:
 	movl $0x10,%eax
+    #这里已经处于 32 位运行模式,因此这里的$0x10 并不是把地址 0x10 装入各个段寄存器,
+    #它现在其实是全局段描述符表中的偏移值,或者更正确地说是一个描述符表项的选择符。
+    #这里$0x10 的含义是请求特权级 0(位 0-1=0)、选择全局描述符表(位 2=0)、选择表中第 1 项(位 3-15=1)。
+    #正好指向表中的数据段描述符项。
 	mov %ax,%ds
 	mov %ax,%es
 	mov %ax,%fs
 	mov %ax,%gs
-	lss _stack_start,%esp
-	call setup_idt
-	call setup_gdt
-	movl $0x10,%eax		# reload all the segment registers
-	mov %ax,%ds		# after changing gdt. CS was already
+	lss _stack_start,%esp # 表示_stack_start->ss:esp。
+        #_stack_start是编译程序为程序自动生成的存有堆栈信息地方。
+	call setup_idt # 调用设置中断描述符表子程序。
+	call setup_gdt # 调用设置全局描述符表子程序。
+	movl $0x10,%eax		# reload all the segment registers 重新加载所有段寄存器
+	mov %ax,%ds		# 在改变过全局描述符表 gdt 之后,CS 代码段寄存器已经在 setup_gdt 中重新加载过了。
 	mov %ax,%es		# reloaded in 'setup_gdt'
 	mov %ax,%fs
 	mov %ax,%gs
 	lss _stack_start,%esp
+    # 下5行行用于测试 A20 地址线是否已经开启。采用的方法是向内存地址 0x000000 处写入任意
+    # 一个数值,然后看内存地址 0x100000(1M)处是否也是这个数值。如果一直相同的话,就一直
+    # 比较下去,也即死循环、死机。表示地址 A20 线没有选通,结果不能对 1M 以上内存寻址。
 	xorl %eax,%eax
 1:	incl %eax		# check that A20 really IS enabled
 	movl %eax,0x000000	# loop forever if it isn't
 	cmpl %eax,0x100000
-	je 1b
+	je 1b # 1b'表示向后(backward)跳转到标号1。若是'5f'则表示向前(forward)跳转到标号5。
 /*
  * NOTE! 486 should set bit 16, to check for write-protect in supervisor
  * mode. Then it would be unnecessary with the "verify_area()"-calls.
