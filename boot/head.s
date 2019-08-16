@@ -53,28 +53,39 @@ startup_32:
  * 486 users probably want to set the NE (#5) bit also, so as to use
  * int 16 for math errors.
  */
-	movl %cr0,%eax		# check math chip
-	andl $0x80000011,%eax	# Save PG,PE,ET
+/*
+* 在下面这段程序中,486 应该将位 16 置位,以检查在超级用户模式下的写保护,
+* 此后"verify_area()"调用中就不需要了。486 的用户通常也会想将 NE(#5)置位,以便
+* 对数学协处理器的出错使用 int 16。
+*/
+# 下面这段程序用于检查数学协处理器芯片是否存在。方法是修改控制寄存器 CR0,在
+# 假设存在协处理器的情况下执行一个协处理器指令,如果出错的话则说明协处理器芯片不存在,
+# 需要设置 CR0 中的协处理器仿真位 EM(位 2),并复位协处理器存在标志 MP(位 1)。
+	movl %cr0,%eax		# check math chip 设置cr0仿真位
+	andl $0x80000011,%eax	# Save PG,PE,ET 保存数值
 /* "orl $0x10020,%eax" here for 486 might be good */
-	orl $2,%eax		# set MP
+	orl $2,%eax		# set MP 设置协处理器 
 	movl %eax,%cr0
 	call check_x87
-	jmp after_page_tables
+	jmp after_page_tables ! 跳转到函数
 
 /*
  * We depend on ET to be correct. This checks for 287/387.
  */
+! 依赖于ET标志的正确性来检测287/387的存在
 check_x87:
 	fninit
 	fstsw %ax
 	cmpb $0,%al
 	je 1f			/* no coprocessor: have to set bits */
-	movl %cr0,%eax
+	movl %cr0,%eax ! 如果存在的则向前跳转到标号 1 处,否则改写 cr0。
 	xorl $6,%eax		/* reset MP, set EM */
 	movl %eax,%cr0
 	ret
 .align 2
-1:	.byte 0xDB,0xE4		/* fsetpm for 287, ignored by 387 */
+# 这里".align 2"的含义是指存储边界对齐调整。"2"表示调整到地址最后2位为零,
+# 即按 4 字节方式对齐内存地址。
+1:	.byte 0xDB,0xE4		/* fsetpm for 287, ignored by 387 */ # 287协处理器码
 	ret
 
 /*
@@ -88,21 +99,34 @@ check_x87:
  *  sure everything is ok. This routine will be over-
  *  written by the page tables.
  */
-setup_idt:
-	lea ignore_int,%edx
-	movl $0x00080000,%eax
-	movw %dx,%ax		/* selector = 0x0008 = cs */
-	movw $0x8E00,%dx	/* interrupt gate - dpl=0, present */
 
-	lea _idt,%edi
-	mov $256,%ecx
+/*
+* 下面这段是设置中断描述符表子程序 setup_idt
+* 将中断描述符表 idt 设置成具有 256 个项,并都指向 ignore_int 中断门。然后加载中断
+* 描述符表寄存器(用 lidt 指令)。真正实用的中断门以后再安装。其它地方一切都正常时再开启中断。
+* 该子程序将会被页表覆盖掉。
+*/
+# 中断描述符表中的项虽然也是 8 字节组成,但其格式与全局表中的不同,被称为门描述符
+# (Gate Descriptor)。它的 0-1,6-7 字节是偏移量,2-3 字节是选择符,4-5 字节是一些标志。
+
+setup_idt:
+	lea ignore_int,%edx # 将 ignore_int 的有效地址(偏移值)值edx->寄存器
+	movl $0x00080000,%eax # 将选择符 0x0008 置入 eax 的高 16 位中。
+	movw %dx,%ax		/* selector = 0x0008 = cs */
+                        # 偏移值的低 16 位置入 eax 的低 16 位中。此时 eax 含有
+                        # 门描述符低 4 字节的值。
+	movw $0x8E00,%dx	/* interrupt gate - dpl=0, present */
+                        # 此时 edx 含有门描述符高 4 字节的值。
+	lea _idt,%edi # _idt 是中断描述符表的地址。
+	mov $256,%ecx # 计数器
+
 rp_sidt:
-	movl %eax,(%edi)
+	movl %eax,(%edi) # 将哑中断门描述符存入表中。
 	movl %edx,4(%edi)
-	addl $8,%edi
-	dec %ecx
-	jne rp_sidt
-	lidt idt_descr
+	addl $8,%edi # edi 指向表中下一项。
+	dec %ecx # 自减
+	jne rp_sidt # 循环 条件为ce=0
+	lidt idt_descr # 加载中断描述符表寄存器值。
 	ret
 
 /*
